@@ -82,21 +82,32 @@ class EurocVioDataset : public VioDataset {
     const int b = mv_block_size, cols = img_w / b, rows = img_h / b;
     const std::streamsize n = f.tellg(), expect = std::streamsize(rows) * cols * 2;
     if (n == 0) return false;
-    if (n != expect) {
-      std::cerr << "Motion vector file " << p << " has " << n << " bytes, expected " << expect << " for a " << cols
-                << "x" << rows << " grid of " << b << "px blocks." << std::endl;
+    // int8 grid (raw sensor vectors) or int16 grid (vectors chained over several frames)
+    const bool wide = n == 2 * expect;
+    if (n != expect && !wide) {
+      std::cerr << "Motion vector file " << p << " has " << n << " bytes, expected " << expect << " (int8) or "
+                << 2 * expect << " (int16) for a " << cols << "x" << rows << " grid of " << b << "px blocks." << std::endl;
       std::abort();
     }
-    std::vector<int8_t> buf(expect);
+    std::vector<int8_t> buf8;
+    std::vector<int16_t> buf16;
     f.seekg(0);
-    f.read(reinterpret_cast<char*>(buf.data()), expect);
+    if (wide) {
+      buf16.resize(rows * cols * 2);
+      f.read(reinterpret_cast<char*>(buf16.data()), n);
+    } else {
+      buf8.resize(expect);
+      f.read(reinterpret_cast<char*>(buf8.data()), n);
+    }
     out.clear();
     out.reserve(rows * cols);
     const float s = mv_negate ? -1.f : 1.f;
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        const int8_t rx = buf[(r * cols + c) * 2], ry = buf[(r * cols + c) * 2 + 1];
-        if (rx == INT8_MIN || ry == INT8_MIN) continue;  // "no vector" sentinel: block gets no guess
+        const size_t k = (r * cols + c) * 2;
+        const int rx = wide ? buf16[k] : buf8[k], ry = wide ? buf16[k + 1] : buf8[k + 1];
+        const int no_mv = wide ? INT16_MIN : INT8_MIN;
+        if (rx == no_mv || ry == no_mv) continue;  // "no vector" sentinel: block gets no guess
         const float dx = s * rx;
         const float dy = s * ry;
         const float cx = c * b + b * 0.5f, cy = r * b + b * 0.5f;
