@@ -95,8 +95,10 @@ class EurocVioDataset : public VioDataset {
     const float s = mv_negate ? -1.f : 1.f;
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        const float dx = s * buf[(r * cols + c) * 2];
-        const float dy = s * buf[(r * cols + c) * 2 + 1];
+        const int8_t rx = buf[(r * cols + c) * 2], ry = buf[(r * cols + c) * 2 + 1];
+        if (rx == INT8_MIN || ry == INT8_MIN) continue;  // "no vector" sentinel: block gets no guess
+        const float dx = s * rx;
+        const float dy = s * ry;
         const float cx = c * b + b * 0.5f, cy = r * b + b * 0.5f;
         out.push_back({-1, b, b, cx - dx, cy - dy, cx, cy});
       }
