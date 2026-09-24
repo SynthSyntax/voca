@@ -137,6 +137,14 @@ class VioDataset {
   // Optional alternate root path for per-camera videos (e.g. generated data.mp4 files).
   // Expected structure: <video_dataset_path>/mav0/camX/data.mp4
   std::string video_dataset_path;
+  // External per-frame motion-vector grids (e.g. from the Aeveon Eye sensor codec):
+  // <mv_dir>/cam<i>/<t_ns>.mv, raw int8 [rows][cols][dx,dy] with one entry per mv_block_size^2 block,
+  // (dx,dy) = displacement of the block from the previous frame to the current one. A missing/empty
+  // file means the frame carries no motion vectors (I-frame). Used instead of the video MVs when set.
+  std::string mv_dir;
+  int mv_block_size = 8;
+  bool mv_negate = false;           // flip the sign of external (dx,dy)
+  bool mv_reuse_on_iframe = false;  // reuse the previous frame's MVs when a frame has none
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 

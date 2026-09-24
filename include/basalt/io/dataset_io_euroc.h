@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <set>
 #include <filesystem>
 #include <iterator>
@@ -68,6 +69,40 @@ class EurocVioDataset : public VioDataset {
   size_t mv_frame_counter = 0;
 
   std::set<size_t> mv_warning_shown_cams;
+  // last non-empty motion vectors per camera, for I-frame bridging (mv_reuse_on_iframe)
+  std::vector<std::vector<MotionVector>> last_mvs;
+
+  // Load an external motion-vector grid for (cam, t_ns) into `out` in the same form as the video
+  // MVs: dst = block centre in the current frame, src = where that block came from in the previous
+  // frame. Returns false when the frame has no MV file (I-frame).
+  bool load_external_mvs(size_t cam, int64_t t_ns, int img_w, int img_h, std::vector<MotionVector>& out) {
+    const std::string p = mv_dir + "/cam" + std::to_string(cam) + "/" + std::to_string(t_ns) + ".mv";
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const int b = mv_block_size, cols = img_w / b, rows = img_h / b;
+    const std::streamsize n = f.tellg(), expect = std::streamsize(rows) * cols * 2;
+    if (n == 0) return false;
+    if (n != expect) {
+      std::cerr << "Motion vector file " << p << " has " << n << " bytes, expected " << expect << " for a " << cols
+                << "x" << rows << " grid of " << b << "px blocks." << std::endl;
+      std::abort();
+    }
+    std::vector<int8_t> buf(expect);
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(buf.data()), expect);
+    out.clear();
+    out.reserve(rows * cols);
+    const float s = mv_negate ? -1.f : 1.f;
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        const float dx = s * buf[(r * cols + c) * 2];
+        const float dy = s * buf[(r * cols + c) * 2 + 1];
+        const float cx = c * b + b * 0.5f, cy = r * b + b * 0.5f;
+        out.push_back({-1, b, b, cx - dx, cy - dy, cx, cy});
+      }
+    }
+    return true;
+  }
 
   // vector of images for every timestamp
   // assumes vectors size is num_cams for every timestamp with null pointers for
@@ -135,8 +170,8 @@ class EurocVioDataset : public VioDataset {
       }
     }
 
-    // Open MV captures only when explicitly enabled.
-    if (use_mvs && mv_caps.empty()) {
+    // Open MV captures only when explicitly enabled (and no external MV source is given).
+    if (use_mvs && mv_dir.empty() && mv_caps.empty()) {
       for (size_t cam_idx = 0; cam_idx < num_cams; cam_idx++) {
         std::string video_path = video_root + "/mav0/cam" + std::to_string(cam_idx) + "/data.mp4";
         if (fs::exists(video_path)) {
@@ -158,7 +193,7 @@ class EurocVioDataset : public VioDataset {
       std::string full_image_path = full_path + "/data/" + image_path[t_ns];
       cv::Mat img;
 
-      if (use_mvs && !fs::exists(full_video_path) && mv_warning_shown_cams.count(i) == 0) {
+      if (use_mvs && mv_dir.empty() && !fs::exists(full_video_path) && mv_warning_shown_cams.count(i) == 0) {
         std::cout << "WARNING: --use-mvs is enabled but no video file found at "
                   << full_video_path << ". Motion vectors will not be available for cam" << i
                   << ". To use motion vectors, encode your image sequences into data.mp4 "
@@ -167,7 +202,7 @@ class EurocVioDataset : public VioDataset {
       }
 
       //&& image_timestamps[frameNumber] == t_ns
-      if (use_mvs && mv_caps.size() > 0 && fs::exists(full_video_path)) {
+      if (use_mvs && mv_dir.empty() && mv_caps.size() > 0 && fs::exists(full_video_path)) {
         int ret = 0;
         //				std::cout << "Trying to read motion vectors of frame (num: " << frameNumber <<
         //") at timestamp " << t_ns << " on cam " << i << "." << std::endl;
@@ -289,6 +324,19 @@ class EurocVioDataset : public VioDataset {
       } else {
         std::cerr << "img.fmt.bpp " << img.type() << std::endl;
         std::abort();
+      }
+
+      if (use_mvs && !mv_dir.empty()) {
+        if (load_external_mvs(i, t_ns, res[i].img->w, res[i].img->h, res[i].motion_vectors)) mv_frame_counter++;
+      }
+      // I-frame bridging, independent of the MV source (paper Sec. 3.4)
+      if (use_mvs) {
+        if (last_mvs.size() != num_cams) last_mvs.resize(num_cams);
+        if (res[i].motion_vectors.empty() && mv_reuse_on_iframe && !last_mvs[i].empty()) {
+          res[i].motion_vectors = last_mvs[i];
+        } else {
+          last_mvs[i] = res[i].motion_vectors;
+        }
       }
 
       auto exp_it = exposure_times[i].find(t_ns);

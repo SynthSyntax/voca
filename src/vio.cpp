@@ -247,6 +247,11 @@ struct basalt_vio_ui : vis::VIOUIBase {
     std::string video_dataset_path;
     // Whether to use video frames instead of image frames for optical flow
     bool use_video_frames = false;
+    // External motion-vector grids (used instead of the video MVs when set)
+    std::string mv_dir;
+    int mv_block_size = 8;
+    bool mv_negate = false;
+    bool mv_reuse_on_iframe = false;
 
     CLI::App app{"Basalt CLI"};
 
@@ -271,6 +276,10 @@ struct basalt_vio_ui : vis::VIOUIBase {
     app.add_option("--use-mvs", use_mvs, "Use motion vectors for tracking guesses");
     app.add_option("--video-dataset-path", video_dataset_path, "Optional path to video dataset if video set differes from image set.");
     app.add_option("--use-video-frames", use_video_frames, "Whether to use video frames instead of image frames for optical flow.");
+    app.add_option("--mv-dir", mv_dir, "External motion-vector grids <dir>/cam<i>/<t_ns>.mv; used instead of data.mp4 MVs when --use-mvs 1.");
+    app.add_option("--mv-block-size", mv_block_size, "Block size in pixels of the external motion-vector grid (default 8).");
+    app.add_option("--mv-negate", mv_negate, "Negate external motion vectors (sign-convention test).");
+    app.add_option("--mv-reuse-on-iframe", mv_reuse_on_iframe, "Reuse the previous frame's motion vectors when a frame has none (I-frame bridging).");
 
     try {
       app.parse(argc, argv);
@@ -320,6 +329,12 @@ struct basalt_vio_ui : vis::VIOUIBase {
       dataset_io->get_data()->use_mvs = use_mvs;
       dataset_io->get_data()->use_video_frames = use_video_frames;
       dataset_io->get_data()->video_dataset_path = video_dataset_path;
+      dataset_io->get_data()->mv_dir = mv_dir;
+      dataset_io->get_data()->mv_block_size = mv_block_size;
+      dataset_io->get_data()->mv_negate = mv_negate;
+      dataset_io->get_data()->mv_reuse_on_iframe = mv_reuse_on_iframe;
+      std::cout << "Motion vector source: " << (!use_mvs ? "none" : mv_dir.empty() ? "video (ffmpeg)" : "external " + mv_dir)
+                << (use_mvs && mv_reuse_on_iframe ? " (reused on I-frames)" : "") << std::endl;
 
       // FIXME: add support for other dataset types
       if (use_mvs && dataset_type != "euroc") {

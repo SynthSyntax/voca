@@ -104,6 +104,13 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
   using OpticalFlowBase::transforms;
   ExecutionStats frontend_stats{};
   std::map<int, int> guess_error_histogram{};
+  // guess error split by whether the initial guess came from a motion vector; 0.1 px bins
+  std::map<int, int> guess_error_hist_mv{};
+  std::map<int, int> guess_error_hist_of{};
+  std::map<FrameId, std::vector<int>> mv_count{};       // motion vectors available per cam
+  std::map<FrameId, std::vector<int>> mv_guess_hits{};  // keypoints that received an MV guess
+  std::map<FrameId, std::vector<int>> points_in{};      // keypoints before tracking
+  std::map<FrameId, std::vector<int>> points_tracked{}; // keypoints after tracking (before detection)
   std::map<FrameId, std::vector<int>> fallback_recovered_points{};
   std::map<FrameId, std::vector<int>> consensus_mv_tracked{};
   std::map<FrameId, std::vector<int>> consensus_of_tracked{};
@@ -197,6 +204,21 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
       stats << "  },\n";
     };
 
+    auto write_hist = [&](const char* name, const std::map<int, int>& hist) {
+      stats << "  \"" << name << "\": {\n";
+      for (auto it = hist.begin(); it != hist.end(); it++) {
+        auto& [bin, count] = *it;
+        bool is_last = it == std::prev(hist.end());
+        stats << "    \"" << bin / 10.0 << "\": " << count << (is_last ? "" : ",") << "\n";
+      }
+      stats << "  },\n";
+    };
+    write_hist("guess_error_hist_mv", guess_error_hist_mv);
+    write_hist("guess_error_hist_of", guess_error_hist_of);
+    write_per_frame_int("mv_count", mv_count);
+    write_per_frame_int("mv_guess_hits", mv_guess_hits);
+    write_per_frame_int("points_in", points_in);
+    write_per_frame_int("points_tracked", points_tracked);
     write_per_frame_int("fallback_recovered_points", fallback_recovered_points);
     write_per_frame_int("consensus_mv_tracked", consensus_mv_tracked);
     write_per_frame_int("consensus_of_tracked", consensus_of_tracked);
@@ -302,7 +324,7 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
     for (const auto& [kpid, kp] : transforms->keypoints[i])
       if (new_transforms->keypoints[i].count(kpid) == 0) lost_kps[kpid] = kp;
 
-    set_guesses_from_motion_vector(lost_kps, new_img_vec->img_data[i].motion_vectors,
+    mv_guess_hits[frame_counter][i] += set_guesses_from_motion_vector(lost_kps, new_img_vec->img_data[i].motion_vectors,
                                    new_transforms->tracking_guesses[i]);
     trackPoints(old_pyramid->at(i), pyramid->at(i),  //
                 lost_kps, new_transforms->keypoints[i],
@@ -319,7 +341,7 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
 
   int trackMotionVectorsFallbackOpticalFlow(const OpticalFlowResult::Ptr& new_transforms, size_t i,
                                             const OpticalFlowInput::Ptr& new_img_vec, const SE3& T_c1_c2) {
-    set_guesses_from_motion_vector(transforms->keypoints[i], new_img_vec->img_data[i].motion_vectors,
+    mv_guess_hits[frame_counter][i] += set_guesses_from_motion_vector(transforms->keypoints[i], new_img_vec->img_data[i].motion_vectors,
                                    new_transforms->tracking_guesses[i]);
     trackPoints(old_pyramid->at(i), pyramid->at(i),  //
                 transforms->keypoints[i], new_transforms->keypoints[i],
@@ -349,7 +371,7 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
                          const OpticalFlowInput::Ptr& new_img_vec, const SE3& T_c1_c2) {
     // Pass 1: MV-initialized OF on all keypoints
     Keypoints mv_kps{}, mv_guesses{};
-    set_guesses_from_motion_vector(transforms->keypoints[i],
+    mv_guess_hits[frame_counter][i] += set_guesses_from_motion_vector(transforms->keypoints[i],
                                    new_img_vec->img_data[i].motion_vectors, mv_guesses);
     trackPoints(old_pyramid->at(i), pyramid->at(i),
                 transforms->keypoints[i], mv_kps, mv_guesses,
@@ -479,6 +501,10 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
       new_transforms->matching_guesses.resize(num_cams);
       new_transforms->recall_guesses.resize(num_cams);
       fallback_recovered_points[frame_counter].resize(num_cams);
+      mv_count[frame_counter].resize(num_cams);
+      mv_guess_hits[frame_counter].resize(num_cams);
+      points_in[frame_counter].resize(num_cams);
+      points_tracked[frame_counter].resize(num_cams);
       consensus_mv_tracked[frame_counter].resize(num_cams);
       consensus_of_tracked[frame_counter].resize(num_cams);
       consensus_both_tracked[frame_counter].resize(num_cams);
@@ -494,6 +520,8 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
         SE3 T_c1_c2 = T_c1.inverse() * T_c2;
 
         bool has_mvs = !new_img_vec->img_data[i].motion_vectors.empty();
+        mv_count[frame_counter][i] = new_img_vec->img_data[i].motion_vectors.size();
+        points_in[frame_counter][i] = transforms->keypoints[i].size();
         if (has_mvs) {
           int fallback_count = -1;
           if (config.optical_flow_subtype == OpticalFlowSubtype::F2F_MV_FALLBACK_OF) {
@@ -513,15 +541,18 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
                       new_img_vec->masks.at(i), new_img_vec->masks.at(i), T_c1_c2, i, i, false);
         }
 
+        points_tracked[frame_counter][i] = new_transforms->keypoints[i].size();
         for (const auto& [kpid, kp] : new_transforms->keypoints[i]) {
           auto guess_it = new_transforms->tracking_guesses[i].find(kpid);
           bool found = guess_it != new_transforms->tracking_guesses[i].end();
-          Eigen::Vector2f guess =
-              found ? guess_it->second.translation() : transforms->keypoints[i].at(kpid).translation();
+          Eigen::Vector2f prev = transforms->keypoints[i].at(kpid).translation();
+          Eigen::Vector2f guess = found ? guess_it->second.translation() : prev;
           Eigen::Vector2f actual = kp.translation();
           float pixel_error = (actual - guess).norm();
           int rounded_error = int(std::round(pixel_error));
           guess_error_histogram[rounded_error]++;
+          bool mv_guess = found && (guess - prev).squaredNorm() > 0;
+          (mv_guess ? guess_error_hist_mv : guess_error_hist_of)[int(std::round(pixel_error * 10))]++;
         }
       }
       new_img_vec->addTime("frontend_tracking_ended");
@@ -548,9 +579,10 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
 
   // TODO@mateosss: Do this in trackPoints parallel_for
   // TODO@mateosss: Use a quadtree or something more efficient for saving the MotionVectors
-  void set_guesses_from_motion_vector(const Keypoints& keypoint_map, const std::vector<MotionVector>& mvs,
-                                      Keypoints& guesses) {
+  int set_guesses_from_motion_vector(const Keypoints& keypoint_map, const std::vector<MotionVector>& mvs,
+                                     Keypoints& guesses) {
     size_t num_mvs = mvs.size();
+    int num_hits = 0;
     for (const auto& [kpid, affine] : keypoint_map) {
       // There is always maximum of one mv per block.
       // TODO@mateosss: previous comment is false. it depends on the x264 "ref" encoding parameter
@@ -570,11 +602,13 @@ class FrameToFrameOpticalFlow final : public OpticalFlowTyped<Scalar, Pattern> {
           auto p = guess.translation();
           if (p.x() < 0 || p.y() < 0 || p.x() >= w || p.y() >= h) continue;
 
+          if (guesses.count(kpid) == 0) num_hits++;
           guesses[kpid] = guess;
           continue;
         }
       }
     }
+    return num_hits;
   }
 
   void trackPoints(const ManagedImagePyr<uint16_t>& pyr_1, const ManagedImagePyr<uint16_t>& pyr_2,  //
